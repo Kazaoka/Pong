@@ -1,25 +1,13 @@
 ﻿#define NOMINMAX
 #include <windows.h>
 
-#include <map>
-#include <tuple>
 #include <memory>
 #include <coroutine>
 #include <cassert>
 #include <array>
-#include <bit>
-#include <thread>
 #include <vector>
-#include <mmsystem.h>
-#include <cmath>
-#include <limits>
 
 #pragma comment(lib, "winmm.lib")
-
-template <typename T>
-constexpr T max_of(const T&) {
-    return std::numeric_limits<T>::max();
-}
 
 class BeepControl {
     static constexpr int sampleRate = 44000;       // 44kHz
@@ -39,7 +27,7 @@ public:
         : buffer_(samples) {
         for (int i = 0; i < samples; ++i) {
             double t = static_cast<double>(i) / sampleRate;
-            t = sqrt(t); // piyo
+            //t = sqrt(t); // piyo
             buffer_[i] = static_cast<BYTE>(127.5 * (sin(2 * 3.141592 * frequency * t) * 0.1 + 1));
         }
         WAVEFORMATEX wfx = {};
@@ -62,16 +50,7 @@ public:
 
 class Window; // Forward declaration
 
-class HInstance {
-    HINSTANCE hInstance_;
-public:
-    HINSTANCE Handle() const { return hInstance_; }
-    HInstance(HINSTANCE hInstance) :
-        hInstance_(hInstance) {
-    }
-};
-
-std::unique_ptr<HInstance> g_hInstance;
+static HINSTANCE g_hInstance;
 
 #define TIMER_FRAME 1
 
@@ -138,8 +117,6 @@ public:
         return true;
     }
     const POINT FieldPosition() const { return POINT{ pos_.x >> shift,pos_.y >> shift }; }
-    //POINT& Position() { return pos_; }
-    //POINT& Velocity() { return velocity_; }
     static SIZE FieldSize() { return SIZE{ size_.cx >> shift, size_.cy >> shift }; }
     void SpeedUp() {
         speed_++;
@@ -246,20 +223,6 @@ public:
     ) {
         return ::MoveWindow(handle_, X, Y, nWidth, nHeight, bRepaint);
     }
-    BOOL MoveWindowBlox(
-        int X,
-        int Y,
-        int nWidth,
-        int nHeight,
-        BOOL bRepaint = TRUE
-    ) {
-        return ::MoveWindow(
-            handle_,
-            X, Y,
-            nWidth, nHeight,
-            bRepaint
-        );
-    }
     Window(const Window&) = delete;
     Window(
         LPCWSTR className,
@@ -276,7 +239,7 @@ public:
         )->HWND {
             WNDCLASS wc = { 0 };
             wc.lpfnWndProc = DummyWndProc;
-            wc.hInstance = g_hInstance->Handle();
+            wc.hInstance = g_hInstance;
             wc.lpszClassName = className;
             wc.hbrBackground = (HBRUSH)GetStockObject(brush);
             wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
@@ -412,25 +375,28 @@ public:
 };
 
 class IdxPlayerFromMouse {
-    static std::map<HANDLE, int> map_mouse_to_player_;
+    static std::array<HANDLE, 2> arr_mouse_;
 public:
     static int Get(HANDLE hDevice) {
-        auto it = map_mouse_to_player_.find(hDevice);
-        if (it != map_mouse_to_player_.end()) {
-            return it->second % 2;
-        }
-        // 新しいマウスデバイスの場合、プレイヤーIDを割り当てる
-        int idx_player = static_cast<int>(map_mouse_to_player_.size());
-        map_mouse_to_player_[hDevice] = idx_player;
-        return idx_player % 2;
+        if (arr_mouse_[0] == hDevice) return 0;
+        if (arr_mouse_[1] == hDevice) return 1;
+        if( arr_mouse_[0] == 0) {
+            arr_mouse_[0] = hDevice;
+            return 0;
+		}
+        arr_mouse_[1] = hDevice;
+        return 1;
     }
     // プレイヤーインデックスを再設定する関数を追加
     static void Set(HANDLE hDevice, int idx_player) {
-        map_mouse_to_player_[hDevice] = idx_player;
+        if(arr_mouse_[1-idx_player] == hDevice) {
+            // 相手プレイヤーに切り替えなら入れ替えにする
+			arr_mouse_[1 - idx_player] = arr_mouse_[idx_player];
+		}
+		arr_mouse_[idx_player] = hDevice;
     }
 };
-// staticメンバの定義
-std::map<HANDLE, int> IdxPlayerFromMouse::map_mouse_to_player_;
+std::array<HANDLE, 2> IdxPlayerFromMouse::arr_mouse_{ 0 };
 
 class MouseOperate {
     std::array<int, 2> delta_y_{0,0};
@@ -906,8 +872,15 @@ static Coroutine GameMain(Window* window) {
     }
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
-    g_hInstance.reset(new HInstance(hInstance));
+#include <sal.h> // Include SAL annotations
+
+int WINAPI WinMain(
+    _In_ HINSTANCE hInstance, 
+    _In_opt_ HINSTANCE hPrevInstance, 
+    _In_ LPSTR lpCmdLine, 
+    _In_ int nCmdShow
+) {
+	g_hInstance = hInstance;
     auto window_main =
         new WindowWithCoroutine<GameMain>(
             L"Breakout",
