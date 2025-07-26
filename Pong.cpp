@@ -6,8 +6,10 @@
 #include <cassert>
 #include <array>
 #include <vector>
+#include <hidsdi.h>
 
 #pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "hid.lib")
 
 class BeepControl {
     static constexpr int sampleRate = 44000;       // 44kHz
@@ -374,29 +376,38 @@ public:
     }
 };
 
-class IdxPlayerFromMouse {
-    static std::array<HANDLE, 2> arr_mouse_;
+template<class T>
+class IdxPlayerFrom {
+    static std::array<T, 2> arr_value_;
 public:
-    static int Get(HANDLE hDevice) {
-        if (arr_mouse_[0] == hDevice) return 0;
-        if (arr_mouse_[1] == hDevice) return 1;
-        if( arr_mouse_[0] == 0) {
-            arr_mouse_[0] = hDevice;
+    static int Get(T value) {
+        if (arr_value_[0] == value) return 0;
+        if (arr_value_[1] == value) return 1;
+        if (arr_value_[0] == 0) {
+            arr_value_[0] = value;
             return 0;
 		}
-        arr_mouse_[1] = hDevice;
+        arr_value_[1] = value;
         return 1;
     }
+    static bool Find(T value) {
+        return arr_value_[0] == value || arr_value_[1] == value;
+	}
     // プレイヤーインデックスを再設定する関数を追加
-    static void Set(HANDLE hDevice, int idx_player) {
-        if(arr_mouse_[1-idx_player] == hDevice) {
+    static void Set(T value, int idx_player) {
+        if(arr_value_[1-idx_player] == value) {
             // 相手プレイヤーに切り替えなら入れ替えにする
-			arr_mouse_[1 - idx_player] = arr_mouse_[idx_player];
+            arr_value_[1 - idx_player] = arr_value_[idx_player];
 		}
-		arr_mouse_[idx_player] = hDevice;
+        arr_value_[idx_player] = value;
     }
 };
-std::array<HANDLE, 2> IdxPlayerFromMouse::arr_mouse_{ 0 };
+using IdxPlayerFromMouse = IdxPlayerFrom<HANDLE>;
+std::array<HANDLE, 2> IdxPlayerFromMouse::arr_value_{ 0 };
+
+using IdxPlayerFromContactId = IdxPlayerFrom<ULONG>;
+std::array<ULONG, 2> IdxPlayerFromContactId::arr_value_{ 0 };
+std::array<ULONG, 2> arr_last_y_{ 0 };
 
 class MouseOperate {
     std::array<int, 2> delta_y_{0,0};
@@ -406,31 +417,89 @@ public:
         UINT dwSize;
         GetRawInputData(hRawInput, RID_INPUT, NULL, &dwSize, sizeof(RAWINPUTHEADER));
 
-        BYTE* lpb = new BYTE[dwSize];
-        if (lpb) {
-            if (GetRawInputData(hRawInput, RID_INPUT, lpb, &dwSize, sizeof(RAWINPUTHEADER)) == dwSize) {
-                RAWINPUT* raw = (RAWINPUT*)lpb;
-                HANDLE hDevice = raw->header.hDevice;
-                if (raw->header.dwType == RIM_TYPEMOUSE) {
-                    // 左クリック検出
-                    if (raw->data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN) {
-                        // カーソル位置取得
-                        POINT pt;
-                        GetCursorPos(&pt);
-                        // ウィンドウ座標に変換
-                        ScreenToClient(hwnd_, &pt);
-                        RECT rc;
-                        GetClientRect(hwnd_, &rc);
-                        int width = rc.right - rc.left;
-                        int idx = (pt.x < width / 2) ? 0 : 1;
-                        IdxPlayerFromMouse::Set(hDevice, idx);
+		std::vector<BYTE> lpb(dwSize);
+        if (GetRawInputData(hRawInput, RID_INPUT, &lpb[0], &dwSize, sizeof(RAWINPUTHEADER)) != dwSize) {
+            return;
+        }
+        RAWINPUT* raw = (RAWINPUT*)lpb.data();
+        HANDLE hDevice = raw->header.hDevice;
+		switch (raw->header.dwType) {
+        case RIM_TYPEMOUSE:
+            // 左クリック検出
+            if (raw->data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN) {
+                // カーソル位置取得
+                POINT pt;
+                GetCursorPos(&pt);
+                // ウィンドウ座標に変換
+                ScreenToClient(hwnd_, &pt);
+                RECT rc;
+                GetClientRect(hwnd_, &rc);
+                int width = rc.right - rc.left;
+                int idx = (pt.x < width / 2) ? 0 : 1;
+                IdxPlayerFromMouse::Set(hDevice, idx);
+            }
+            // プレイヤーインデックス取得
+            delta_y_[IdxPlayerFromMouse::Get(hDevice)] += raw->data.mouse.lLastY;
+            break;
+        case RIM_TYPEHID:
+            {
+                GetRawInputDeviceInfo(raw->header.hDevice, RIDI_PREPARSEDDATA, NULL, &dwSize);
+                std::vector<BYTE> preparsedData(dwSize);
+                auto ptr_preparsedData = reinterpret_cast<PHIDP_PREPARSED_DATA>(&preparsedData[0]);
+                GetRawInputDeviceInfo(raw->header.hDevice, RIDI_PREPARSEDDATA, ptr_preparsedData, &dwSize);
+
+                HIDP_CAPS caps;
+                HidP_GetCaps(ptr_preparsedData, &caps);
+
+                USHORT capsLength = caps.NumberInputValueCaps;
+                std::vector<HIDP_VALUE_CAPS> valueCaps(capsLength);
+                auto ptr_valueCaps = reinterpret_cast<PHIDP_VALUE_CAPS>(&valueCaps[0]);
+                HidP_GetValueCaps(HidP_Input, &valueCaps[0], &capsLength, ptr_preparsedData);
+
+                // 例: X/Y座標のUsagePage/Usageを探す
+                USAGE usageX = 0, usageY = 0;
+                for (const auto& cap : valueCaps) {
+                    if (cap.UsagePage == 0x0D) { // Digitizers
+                        if (cap.NotRange.Usage == 0x30) usageX = 0x30; // X
+                        if (cap.NotRange.Usage == 0x31) usageY = 0x31; // Y
                     }
-                    // プレイヤーインデックス取得
-                    int idx_player = IdxPlayerFromMouse::Get(hDevice);
-                    delta_y_[idx_player] += raw->data.mouse.lLastY;
+                }
+
+                auto report = reinterpret_cast<PCHAR>(&raw->data.hid.bRawData[0]);
+                UINT reportSize = raw->data.hid.dwSizeHid;
+                // 各指ごとに処理
+                std::array<bool, 2> touched{ false, false };
+                for (UINT i = 0; i < raw->data.hid.dwCount; ++i) {
+                    ULONG contactId = 0;
+                    ULONG x = 0, y = 0;
+                    // 指ID, X, YのUsageをHidP_GetUsageValueで取得
+                    HidP_GetUsageValue(HidP_Input, 0x0D, 0, 0x51, &contactId, ptr_preparsedData, report + i * reportSize, reportSize);
+                    // X
+                    HidP_GetUsageValue(HidP_Input, 0x0D, 0, usageX, &x, ptr_preparsedData, report + i * reportSize, reportSize);
+                    // Y
+                    HidP_GetUsageValue(HidP_Input, 0x0D, 0, usageY, &y, ptr_preparsedData, report + i * reportSize, reportSize);
+
+                    // なぞり開始時に左右判定
+                    if (!IdxPlayerFromContactId::Find(contactId)) {
+
+                        int idx = (x < 32767/*caps.PhysicalMax*/ / 2) ? 0 : 1;
+                        IdxPlayerFromContactId::Set(contactId, idx);
+                        arr_last_y_[idx] = y; // 最後のY座標を保存
+                    }
+                    int idx_player = IdxPlayerFromContactId::Get(contactId);
+                    delta_y_[idx_player] += y - arr_last_y_[idx_player];
+                    arr_last_y_[idx_player] = y; // 最後のY座標を保存
+                    touched[idx_player] = true;
+
+                    // 指が離れたらerase（HIDレポートでContact状態を見て管理）
+                }
+                for (int idx_player = 0; idx_player < touched.size(); idx_player++) {
+                    if (!touched[idx_player]) {
+                        // 指が離れた場合、インデックスをリセット
+                        IdxPlayerFromContactId::Set(0, idx_player);
+                    }
                 }
             }
-            delete[] lpb;
         }
     }
     int DeltaYPop(int idx_player) { auto delta_y = delta_y_[idx_player]; delta_y_[idx_player] = 0; return delta_y; }
@@ -570,6 +639,7 @@ public:
         ),
         mouse_operate_(new MouseOperate(Handle())) {
         SetWindowProc(WndProc);
+		EnableMouseInPointer(TRUE); // マウスポインターを有効にする
     }
 };
 template<auto coroutine>
@@ -843,9 +913,8 @@ static Coroutine GameMain(Window* window) {
 				}
                 if (bound) {
                     cnt_bound_paddle++;
-                    int bits = (cnt_bound_paddle >> 1); // /2
-                    if((bits & (bits-1))==0) { // 2の累乗のとき
-						// 2, 4, 8, 16, ... のときにボールの速度を上げる
+					if (cnt_bound_paddle == 3) { // 3回パドルに当たったら速度アップ
+                        cnt_bound_paddle = 0; // リセット
                         ball_set.ball_.SpeedUp();
                     }
                 }
